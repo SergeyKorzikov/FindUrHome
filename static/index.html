@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FindUrHome — жильё со всех сайтов</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">⌂ <b>Find</b>Ur<b>Home</b></div>
+    <div class="mode" role="tablist">
+      <button data-mode="short" class="active">Посуточно / отели</button>
+      <button data-mode="long">Долгосрочная аренда</button>
+    </div>
+  </header>
+
+  <form id="search" class="search">
+    <label class="grow">Где
+      <input name="location" placeholder="Город, район, адрес…" required autocomplete="off" />
+    </label>
+    <label class="short-only">Заезд <input type="date" name="checkin" /></label>
+    <label class="short-only">Выезд <input type="date" name="checkout" /></label>
+    <label class="short-only narrow">Гостей <input type="number" name="guests" min="1" max="30" value="2" /></label>
+    <button type="submit" class="go">Найти</button>
+  </form>
+
+  <main class="layout">
+    <aside class="filters">
+      <h3>Фильтры</h3>
+      <div class="row">
+        <label>Цена от <input type="number" name="price_min" form="search" min="0" /></label>
+        <label>до <input type="number" name="price_max" form="search" min="0" /></label>
+      </div>
+      <p class="hint" id="priceHint">за ночь</p>
+      <label>Валюта
+        <select name="currency" form="search">
+          <option>USD</option><option>EUR</option><option>TRY</option><option>RUB</option>
+          <option>GBP</option><option>AED</option><option>GEL</option><option>THB</option>
+        </select>
+      </label>
+      <label>Комнат от
+        <select name="rooms_min" form="search">
+          <option value="">любое</option><option value="1">1+</option><option value="2">2+</option>
+          <option value="3">3+</option><option value="4">4+</option>
+        </select>
+      </label>
+      <label>Рейтинг от
+        <select name="rating_min" form="search">
+          <option value="">любой</option><option value="7">7+</option><option value="8">8+</option><option value="9">9+</option>
+        </select>
+      </label>
+      <fieldset>
+        <legend>Тип</legend>
+        <div id="types" class="chips"></div>
+      </fieldset>
+      <label>Сортировка
+        <select name="sort" form="search">
+          <option value="relevance">Лучшие</option>
+          <option value="price_asc">Сначала дешёвые</option>
+          <option value="price_desc">Сначала дорогие</option>
+          <option value="rating">По рейтингу</option>
+          <option value="distance">Ближе к центру</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="onlyPriced" /> Только с ценой</label>
+      <label class="check"><input type="checkbox" id="onlyFav" /> Только избранное ★</label>
+      <fieldset>
+        <legend>Сайты</legend>
+        <div id="sources"></div>
+      </fieldset>
+    </aside>
+
+    <section class="results">
+      <div id="status" class="status">Введите город и нажмите «Найти».</div>
+      <div id="stats" class="stats"></div>
+      <div id="list" class="list"></div>
+    </section>
+
+    <section class="mapwrap"><div id="map"></div></section>
+  </main>
+
+  <button id="chatToggle" class="chat-toggle" title="ИИ-помощник">✦ Спросить ИИ</button>
+  <aside id="chat" class="chat open" aria-label="ИИ-помощник">
+    <div class="chat-head">
+      <b>✦ ИИ-помощник</b>
+      <span id="aiMode" class="ai-mode"></span>
+      <button id="chatClose" class="icon" title="Свернуть">—</button>
+    </div>
+    <div id="chatLog" class="chat-log"></div>
+    <div class="chat-suggest" id="chatSuggest">
+      <button>Двушка в Стамбуле на месяц до 1000$</button>
+      <button>Отель в Лиссабоне на выходные, рейтинг 8+</button>
+      <button>Где дешевле жить в Берлине?</button>
+    </div>
+    <form id="chatForm" class="chat-form">
+      <textarea name="msg" rows="2" placeholder="Опишите, что ищете: город, сроки, бюджет, что важно…" required></textarea>
+      <button type="submit">➤</button>
+    </form>
+  </aside>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

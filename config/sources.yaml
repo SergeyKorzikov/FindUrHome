@@ -1,0 +1,45 @@
+# Подключение новых сайтов БЕЗ написания кода.
+#
+# Переменные в шаблонах URL / input:
+#   {location} {location_q} (англ. название города из геокодера), {query_raw} (как ввёл человек), {city} {city_slug} {country} {lat} {lon}
+#   {checkin} {checkout} {guests} {price_min} {price_max} {rooms_min} {currency} {page}
+
+# --- 1. Сайты, которые отдают объявления в schema.org JSON-LD -----------------
+jsonld:
+  - id: rentola
+    name: Rentola
+    description: Агрегатор долгосрочной аренды, десятки стран
+    modes: [long]
+    url: "https://www.rentola.com/for-rent?location={location_q}&page={page}"
+    pages: 3            # сколько страниц выдачи обходить
+    price_unit: month
+
+  # Шаблон для своего сайта:
+  # - id: mysite
+  #   name: Мой сайт
+  #   modes: [long, short]
+  #   countries: [tr]   # опрашивать только для этих стран (ISO-код)
+  #   url:
+  #     long:  "https://example.com/rent/{city_slug}?min={price_min}&max={price_max}"
+  #     short: "https://example.com/daily/{city_slug}?from={checkin}&to={checkout}"
+  #   price_unit: month
+
+# --- 2. Акторы Apify (нужен APIFY_TOKEN) --------------------------------------
+# Каждый актор возвращает свои поля, поэтому для него задаётся карта полей (map):
+# путь вида "a.b.0.c" внутри элемента датасета. Проверьте вывод актора в консоли
+# Apify и поправьте пути. enabled: false — шаблон, пока вы его не проверите.
+apify:
+  - id: zillow
+    name: Zillow (США)
+    enabled: false
+    modes: [long]
+    countries: [us]
+    actor: maxcopell/zillow-scraper
+    input:
+      searchUrls:
+        - url: "https://www.zillow.com/{city_slug}/rentals/"
+      maxItems: 100
+    map: {title: address, price: unformattedPrice, url: detailUrl, lat: latLong.latitude,
+          lon: latLong.longitude, rooms: beds, area_m2: area, image: imgSrc}
+    currency: USD
+    price_unit: month
