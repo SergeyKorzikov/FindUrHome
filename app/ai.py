@@ -8,10 +8,12 @@
   anthropic — Claude, ключ ANTHROPIC_API_KEY
   openai    — любой OpenAI-совместимый API: OpenAI, OpenRouter, Groq, локальная Ollama
               (AI_BASE_URL, AI_API_KEY)
-Без ключа работает простой разбор фраз (без «понимания», но поиск запускает).
+  free      — по умолчанию, БЕЗ КЛЮЧА: бесплатная модель через Pollinations.ai
+Если бесплатный сервис недоступен — простой разбор фраз (поиск всё равно запускается).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -24,6 +26,7 @@ from pydantic import BaseModel, Field
 from .models import Mode, SearchQuery, SearchResult
 
 MAX_TOOL_ROUNDS = 4
+FREE_URL = os.getenv("FREE_AI_URL", "https://text.pollinations.ai/openai")
 
 
 class ChatMessage(BaseModel):
@@ -55,7 +58,7 @@ SEARCH_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
-            "location": {"type": "string", "description": "Город/район/адрес, лучше на английском: 'Kadikoy, Istanbul'"},
+            "location": {"type": "string", "description": "Только город или район, на английском: 'Lisbon', 'Kadikoy, Istanbul'. Без слов center/downtown"},
             "mode": {"type": "string", "enum": ["short", "long"], "description": "short — посуточно/отели, long — аренда на месяцы"},
             "checkin": {"type": "string", "description": "YYYY-MM-DD, только для short"},
             "checkout": {"type": "string", "description": "YYYY-MM-DD, только для short"},
@@ -64,7 +67,7 @@ SEARCH_TOOL = {
             "price_max": {"type": "number"},
             "currency": {"type": "string", "description": "ISO-код, напр. USD, EUR, TRY"},
             "rooms_min": {"type": "integer", "description": "Минимум спален"},
-            "rating_min": {"type": "number", "description": "0–10"},
+            "rating_min": {"type": "number", "description": "Шкала 0–10 (как Booking): 4.5 из 5 звёзд = 9. Обычно не задавай"},
             "property_types": {"type": "array", "items": {"type": "string"},
                                "description": "hotel, apartment, hostel, guest_house, house, room, villa, vacation_rental"},
             "sort": {"type": "string", "enum": ["relevance", "price_asc", "price_desc", "rating", "distance"]},
@@ -84,11 +87,17 @@ def system_prompt(context: Optional[dict]) -> str:
 
 Как работать:
 - Отвечай на языке пользователя, коротко и по делу.
-- Если не хватает критичного (где искать; для посуточно — примерные даты), задай 1–2 уточняющих вопроса.
-  Остальное (бюджет, комнаты) не выпытывай — ищи с разумными умолчаниями и предложи сузить.
-- Как только известно место — вызывай search_housing. Можно вызвать несколько раз (например, сравнить два района).
-- Разбирая результаты: выдели 3–5 лучших вариантов с ценой, источником и почему они подходят;
-  если объект найден на нескольких сайтах (поле also_on) — скажи, где дешевле.
+- ГЛАВНОЕ ПРАВИЛО: как только известно место — СРАЗУ вызывай search_housing, ничего не переспрашивая.
+  Даты, бюджет, комнаты — бери из сообщения или оставляй пустыми. Уточнять можно ПОСЛЕ показа результатов.
+- Никогда не переспрашивай то, что пользователь уже сказал. Без места — спроси только «где ищем?».
+- Можно вызывать поиск несколько раз (например, сравнить два района).
+- property_types указывай, только если человек явно исключает другие типы.
+- КАК ССЫЛАТЬСЯ НА ВАРИАНТЫ: только меткой [#N], где N — поле n из результатов поиска.
+  Сайт сам подставит вместо метки настоящее название, цену, рейтинг, расстояние и ссылку.
+  НЕ пиши сам названия, цены, расстояния и ссылки объявлений — только метку и своё объяснение.
+  Хорошо: «[#2] — дешевле всех и рейтинг выше 9; [#5] — если важна тишина».
+  Плохо: таблицы с названиями и ценами.
+- Выдели 3–5 лучших вариантов и объясни выбор; если в also_on объект есть на других сайтах — скажи, где дешевле.
 - Будь честен: не выдумывай объявлений, цен и деталей, которых нет в результатах. Если источник
   вернул ошибку — скажи об этом. Цены у объявлений без дат могут быть ориентировочными.
 - Для долгосрочной аренды напоминай о безопасности: не переводить залог до просмотра и договора,
@@ -97,9 +106,45 @@ def system_prompt(context: Optional[dict]) -> str:
   но отделяй свои общие знания от данных поиска.{ctx}"""
 
 
+PLACEHOLDER_RE = re.compile(r"\[#(\d{1,3})\]")
+URL_RE = re.compile(r"https?://[^\s)\]>]+")
+
+
+def ground_reply(reply: str, res: Optional[SearchResult]) -> str:
+    """Подставляет реальные данные вместо [#N] и вырезает ссылки, которых нет в результатах."""
+    if not res:
+        return URL_RE.sub("", reply) if "airbnb.com/rooms" in reply or "booking.com/hotel" in reply else reply
+    cur = res.query.currency
+    unit = "/ночь" if res.query.mode == Mode.short else "/мес"
+
+    def card(m: re.Match) -> str:
+        i = int(m.group(1)) - 1
+        if not 0 <= i < len(res.listings):
+            return ""
+        l = res.listings[i]
+        bits = [f"**{l.title}**"]
+        if l.price_conv is not None:
+            bits.append(f"{round(l.price_conv):,} {cur}{unit}".replace(",", " "))
+        if l.rating:
+            bits.append(f"★ {l.rating:.1f}")
+        if l.rooms is not None:
+            bits.append(f"{l.rooms} комн.")
+        if l.distance_km is not None:
+            bits.append(f"{l.distance_km} км от центра")
+        bits.append(l.source)
+        if "too_cheap" in l.flags:
+            bits.append("⚠ подозрительно дёшево")
+        return f"[#{i + 1}] " + " · ".join(bits) + (f" {l.url}" if l.url else "")
+
+    reply = reply.replace("**", "")  # своё выделение модели путается с нашим — убираем
+    known = {l.url for l in res.listings if l.url} | {o.get("url") for l in res.listings for o in l.also_on if o.get("url")}
+    reply = URL_RE.sub(lambda m: m.group(0) if m.group(0) in known else "", reply)
+    return PLACEHOLDER_RE.sub(card, reply)
+
+
 def compact_result(res: SearchResult, top: int = 15) -> dict:
     return {
-        "area": res.area.name if res.area else None,
+        "area": res.area.name if res.area else None,  # проверь, что это нужный город/страна
         "total_found": res.total,
         "sources": {k: (v.get("count") if v.get("ok") else f"ошибка: {v.get('error')}") for k, v in res.source_stats.items()},
         "currency": res.query.currency,
@@ -111,6 +156,7 @@ def compact_result(res: SearchResult, top: int = 15) -> dict:
                 "reviews": l.reviews, "type": l.property_type, "km_to_center": l.distance_km,
                 "also_on": [{"source": o.get("source"), "price": o.get("price")} for o in l.also_on][:5],
                 "url": l.url,
+                **({"warning": "цена сильно ниже рынка — возможна приманка/мошенничество"} if "too_cheap" in l.flags else {}),
             }
             for i, l in enumerate(res.listings[:top])
         ],
@@ -138,24 +184,40 @@ class Assistant:
     @property
     def provider(self) -> str:
         p = os.getenv("AI_PROVIDER", "").lower()
-        if p in ("anthropic", "openai"):
+        if p in ("anthropic", "openai", "free", "basic"):
             return p
         if os.getenv("ANTHROPIC_API_KEY"):
             return "anthropic"
         if os.getenv("AI_BASE_URL") or os.getenv("AI_API_KEY") or os.getenv("OPENAI_API_KEY"):
             return "openai"
-        return "basic"
+        return "free"
 
     async def _run_tool(self, name: str, args: dict, state: dict) -> str:
         if name != "search_housing":
             return json.dumps({"error": f"нет инструмента {name}"})
         try:
             q = tool_input_to_query(args)
+            if q.rating_min is not None and q.rating_min <= 5:  # модель указала по 5-балльной шкале
+                q.rating_min = q.rating_min * 2
             res = await self.search_fn(q)
+            relaxed: list[str] = []
+            raw = sum(v.get("count", 0) for v in res.source_stats.values())
+            if res.total == 0 and raw > 0:
+                # фильтры отсекли всё, хотя сайты что-то вернули — ослабляем по шагам
+                for field in ("property_types", "rating_min", "rooms_min", "price_min"):
+                    if getattr(q, field) not in (None, [], 0, 0.0):
+                        q = q.model_copy(update={field: [] if field == "property_types" else None})
+                        relaxed.append(field)
+                        res = await self.search_fn(q)
+                        if res.total:
+                            break
         except Exception as e:  # noqa: BLE001
             return json.dumps({"error": f"{type(e).__name__}: {e}"[:300]}, ensure_ascii=False)
         state["search"] = res
-        return json.dumps(compact_result(res), ensure_ascii=False)
+        out = compact_result(res)
+        if relaxed:
+            out["note"] = f"По исходным фильтрам ничего не было; ослабил: {', '.join(relaxed)}. Скажи об этом пользователю."
+        return json.dumps(out, ensure_ascii=False)
 
     async def chat(self, req: ChatRequest) -> ChatResponse:
         prov = self.provider
@@ -164,8 +226,23 @@ class Assistant:
             reply = await self._anthropic(req, state)
         elif prov == "openai":
             reply = await self._openai(req, state)
+        elif prov == "free":
+            reply = None
+            # у анонимного бесплатного доступа есть лимит частоты — повторяем с паузой
+            for delay in (0, 4, 10):
+                await asyncio.sleep(delay)
+                try:
+                    reply = await self._openai(req, state, url=FREE_URL, key=None, model=os.getenv("AI_MODEL", "openai"))
+                    break
+                except Exception:
+                    continue
+            if reply is None:  # не оставляем человека без ответа
+                prov = "basic"
+                reply = await self._basic(req, state)
         else:
             reply = await self._basic(req, state)
+        if prov != "basic":
+            reply = ground_reply(reply, state.get("search"))
         return ChatResponse(reply=reply, search=state.get("search"), provider=prov)
 
     # --- Claude -----------------------------------------------------------
@@ -194,17 +271,28 @@ class Assistant:
         return "Я сделал несколько поисков — результаты на карте. Уточните, что важнее всего?"
 
     # --- OpenAI-совместимые (OpenAI, OpenRouter, Groq, Ollama…) ------------
-    async def _openai(self, req: ChatRequest, state: dict) -> str:
-        base = (os.getenv("AI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
-        key = os.getenv("AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "none"
-        headers = {"Authorization": f"Bearer {key}", "content-type": "application/json"}
+    async def _openai(self, req: ChatRequest, state: dict, url: str | None = None,
+                      key: str | None = "env", model: str | None = None) -> str:
+        if url is None:
+            url = (os.getenv("AI_BASE_URL") or "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
+        if key == "env":
+            key = os.getenv("AI_API_KEY") or os.getenv("OPENAI_API_KEY") or "none"
+        model = model or os.getenv("AI_MODEL", "gpt-4o-mini")
+        headers = {"content-type": "application/json"}
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
         tool = {"type": "function", "function": {"name": SEARCH_TOOL["name"], "description": SEARCH_TOOL["description"],
                                                  "parameters": SEARCH_TOOL["input_schema"]}}
         msgs: list[dict] = [{"role": "system", "content": system_prompt(req.context)}]
         msgs += [{"role": m.role, "content": m.content} for m in req.messages if m.content.strip()]
-        for _ in range(MAX_TOOL_ROUNDS + 1):
-            body = {"model": os.getenv("AI_MODEL", "gpt-4o-mini"), "messages": msgs, "tools": [tool]}
-            r = await self.client.post(f"{base}/chat/completions", headers=headers, json=body, timeout=120)
+        # слабые бесплатные модели любят переспрашивать: если в последнем сообщении
+        # явно есть место, первый ход модели — обязательно поиск
+        force = bool(parse_request(req.messages[-1].content).get("location")) and req.messages[-1].role == "user"
+        for round_no in range(MAX_TOOL_ROUNDS + 1):
+            body = {"model": model, "messages": msgs, "tools": [tool]}
+            if force and round_no == 0:
+                body["tool_choice"] = "required"
+            r = await self.client.post(url, headers=headers, json=body, timeout=120)
             if r.status_code >= 400:
                 raise RuntimeError(f"AI API {r.status_code}: {r.text[:300]}")
             msg = r.json()["choices"][0]["message"]
@@ -227,10 +315,9 @@ class Assistant:
         last = req.messages[-1].content
         args = parse_request(text, last)
         if not args.get("location"):
-            return ("Я работаю в простом режиме (ИИ-ключ не настроен), поэтому понимаю только прямые запросы. "
+            return ("Бесплатный ИИ-сервис сейчас не ответил, поэтому я в простом режиме и понимаю только прямые запросы. "
                     "Напишите, например: «квартира в Стамбуле на месяц до 1000 USD, 2 комнаты» или "
-                    "«отель в Лиссабоне с 10 по 12 декабря». Чтобы включить полноценного помощника, "
-                    "добавьте ANTHROPIC_API_KEY или AI_BASE_URL в .env.")
+                    "«отель в Лиссабоне с 10 по 12 декабря». Попробуйте и обычный вопрос чуть позже.")
         out = json.loads(await self._run_tool("search_housing", args, state))
         if "error" in out:
             return f"Не получилось выполнить поиск: {out['error']}"
@@ -242,7 +329,7 @@ class Assistant:
         for t in out["top"][:5]:
             price = f"{t['price']:.0f} {out['currency']}" if t["price"] else "цена на сайте"
             lines.append(f"• {t['title']} — {price} ({t['source']})")
-        lines.append("Все варианты на карте. (Простой режим: для живого диалога подключите ИИ-ключ.)")
+        lines.append("Все варианты на карте. (Простой режим: бесплатный ИИ временно не ответил.)")
         return "\n".join(lines)
 
 
@@ -258,13 +345,16 @@ def parse_request(text: str, last: str = "") -> dict:
     """Очень простой разбор без ИИ: место, режим, бюджет, комнаты, даты."""
     t = text.lower()
     args: dict[str, Any] = {}
-    m = None
+    stop = {"месяц", "сутки", "день", "неделю", "центре", "центр", "районе", "городе", "квартире", "отеле",
+            "декабре", "январе", "феврале", "марте", "апреле", "мае", "июне", "июле", "августе", "сентябре",
+            "октябре", "ноябре", "center", "the", "a", "december", "january", "summer", "winter"}
+    loc = None
     for m in re.finditer(r"(?:\bв|\bво|\bin|\bnear|\bрядом с)\s+([A-Za-zА-Яа-яЁё\-]+(?:[ ,]+[A-ZА-ЯЁ][\wА-Яа-яЁё\-]+)*)", text):
-        pass  # берём последнее упоминание
-    if m:
-        loc = m.group(1).strip(" ,")
-        if loc.lower() not in ("месяц", "сутки", "день", "неделю", "центре"):
-            args["location"] = _ru_city_nominative(loc)
+        cand = m.group(1).strip(" ,")
+        if cand.split()[0].lower() not in stop and cand[0].isupper():
+            loc = cand  # последнее осмысленное упоминание
+    if loc:
+        args["location"] = _ru_city_nominative(loc)
     long_kw = re.search(r"месяц|долгоср|надолго|на год|аренд|снять квартир|rent\b|monthly|lease", t)
     short_kw = re.search(r"посуточ|отел|гостиниц|хостел|ноч|сутк|hotel|hostel|night|airbnb|booking", t)
     args["mode"] = "long" if long_kw and not short_kw else "short"
@@ -288,9 +378,14 @@ def parse_request(text: str, last: str = "") -> dict:
     elif re.search(r"тр[её]шк", t):
         args["rooms_min"] = 3
     gm = re.search(r"(\d+)\s*(?:гост|человек|чел|взросл|guests|people|adults)", t)
+    together = {"вдвоём": 2, "вдвоем": 2, "втроём": 3, "втроем": 3, "вчетвером": 4, "впятером": 5}
     if gm:
         args["guests"] = int(gm.group(1))
-    dm = re.search(r"с\s*(\d{1,2})\s*(?:по|-|до)\s*(\d{1,2})\s+([а-яa-z]{3})", t)
+    else:
+        for w, n in together.items():
+            if w in t:
+                args["guests"] = n
+    dm = re.search(r"(?:с\s*)?(\d{1,2})\s*(?:по|-|–|—|до)\s*(\d{1,2})\s+([а-яa-z]{3})", t)
     if dm and dm.group(3)[:3] in _RU_MONTHS:
         mon = _RU_MONTHS[dm.group(3)[:3]]
         today = date.today()

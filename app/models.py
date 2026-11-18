@@ -75,6 +75,7 @@ class Listing(BaseModel):
     # заполняется агрегатором: цена в валюте запроса
     price_conv: Optional[float] = None
     distance_km: Optional[float] = None
+    flags: list[str] = Field(default_factory=list, description="too_cheap — сильно дешевле медианы выдачи")
 
 
 class SourceInfo(BaseModel):

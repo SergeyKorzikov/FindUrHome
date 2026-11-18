@@ -71,8 +71,9 @@ def test_openai_compatible_tool_loop(monkeypatch):
 
 
 def test_basic_mode_without_keys(monkeypatch):
-    for k in ("ANTHROPIC_API_KEY", "AI_PROVIDER", "AI_BASE_URL", "AI_API_KEY", "OPENAI_API_KEY"):
+    for k in ("ANTHROPIC_API_KEY", "AI_BASE_URL", "AI_API_KEY", "OPENAI_API_KEY"):
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("AI_PROVIDER", "basic")
 
     async def go():
         async with httpx.AsyncClient() as c:
@@ -80,3 +81,29 @@ def test_basic_mode_without_keys(monkeypatch):
 
     res = run(go())
     assert res.provider == "basic" and "Casa Azul" in res.reply
+
+
+def test_free_provider_is_default_and_falls_back(monkeypatch):
+    for k in ("ANTHROPIC_API_KEY", "AI_PROVIDER", "AI_BASE_URL", "AI_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    def handler(req):
+        return httpx.Response(503, text="busy")
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+            a = Assistant(c, fake_search)
+            assert a.provider == "free"
+            return await a.chat(ChatRequest(messages=[ChatMessage(role="user", content="квартира в Лиссабоне на месяц")]))
+
+    res = run(go())
+    assert res.provider == "basic" and "Casa Azul" in res.reply
+
+
+def test_ground_reply_replaces_placeholders_and_drops_fake_urls():
+    from app.ai import ground_reply
+    res = run(fake_search(SearchQuery(location="Lisbon", currency="EUR")))
+    res.listings[0].url = "https://www.airbnb.com/rooms/1"
+    out = ground_reply("Берите [#1]. Ещё есть https://www.airbnb.com/rooms/999 и [#7].", res)
+    assert "Casa Azul" in out and "80 EUR/ночь" in out and "rooms/1" in out
+    assert "rooms/999" not in out and "[#7]" not in out

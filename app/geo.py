@@ -31,7 +31,18 @@ PLACE_TYPES = {"city", "town", "village", "municipality", "state", "country", "s
                "neighbourhood", "city_district", "borough", "district", "province", "region", "county", "island"}
 
 
+CENTER_RE = re.compile(r"\b(city\s+cent(?:er|re)|cent(?:er|re)|downtown|old\s+town|центр[а-я]*|в\s+центре|merkez)\b", re.I)
+
+
+def clean_place(text: str) -> str:
+    """«Lisbon city center» -> «Lisbon»: центр и так берётся по умолчанию,
+    а с этими словами геокодер находит одноимённые посёлки (Lisbon Center, Illinois)."""
+    cleaned = re.sub(r"\s{2,}", " ", CENTER_RE.sub(" ", text)).strip(" ,-")
+    return cleaned or text
+
+
 async def geocode(client: httpx.AsyncClient, text: str) -> GeoArea | None:
+    text = clean_place(text)
     key = text.strip().lower()
     if key in _geo_cache:
         return _geo_cache[key]

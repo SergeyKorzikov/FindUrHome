@@ -130,3 +130,23 @@ def test_parse_request_ru():
 def test_tool_input_to_query():
     q = tool_input_to_query({"location": "Paris", "mode": "short", "checkin": "2027-01-05", "currency": "eur", "price_max": None})
     assert q.checkin == date(2027, 1, 5) and q.currency == "EUR" and q.price_max is None
+
+
+def test_clean_place():
+    from app.geo import clean_place
+    assert clean_place("Lisbon city center") == "Lisbon"
+    assert clean_place("центр Стамбула") == "Стамбула"
+    assert clean_place("Kadikoy, Istanbul") == "Kadikoy, Istanbul"
+
+
+def test_parse_request_center_and_together():
+    a = parse_request("Еду в Лиссабон 10-14 декабря вдвоём, хочу квартиру в центре до 120 евро")
+    assert a["location"] == "Лиссабон" and a["guests"] == 2 and a["checkin"].endswith("-12-10")
+    assert a["checkout"].endswith("-12-14") and a["currency"] == "EUR"
+
+
+def test_flag_outliers():
+    from app.aggregator import flag_outliers
+    items = [L(id=str(i), price_conv=1000 + i * 10, rooms=1) for i in range(10)] + [L(id="x", price_conv=150, rooms=1)]
+    flag_outliers(items)
+    assert items[-1].flags == ["too_cheap"] and not items[0].flags

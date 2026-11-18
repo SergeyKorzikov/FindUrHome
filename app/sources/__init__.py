@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import yaml
 
+from .airbnb import AirbnbSource
 from .apify import ApifyConfigSource
 from .base import Source
 from .booking_rapidapi import BookingRapidApiSource
@@ -18,6 +19,7 @@ from .osm import OSMSource
 from .serpapi_hotels import SerpApiHotelsSource
 
 BUILTIN: list[type[Source]] = [
+    AirbnbSource,
     SerpApiHotelsSource,
     BookingRapidApiSource,
     LiteApiSource,

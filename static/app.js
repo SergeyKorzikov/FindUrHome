@@ -130,6 +130,7 @@ function render() {
           ${l.area_m2 ? `<span>${Math.round(l.area_m2)} м²</span>` : ""}
           ${l.distance_km != null ? `<span>${l.distance_km} км до центра</span>` : ""}
         </div>
+        ${l.flags?.includes("too_cheap") ? `<div class="warn" title="Цена намного ниже медианы похожих вариантов. Не переводите деньги до просмотра и договора.">⚠ Подозрительно дёшево — проверьте до оплаты</div>` : ""}
         ${also}
         <div class="foot">
           <span class="price">${priceText(l, cur)}</span>
@@ -202,8 +203,17 @@ function applyQueryToForm(q) {
 const chatLog = $("#chatLog");
 function linkify(text) {
   return esc(text).replace(/https?:\/\/[^\s)]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u.length > 40 ? u.slice(0, 40) + "…" : u}</a>`)
-    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/\[#(\d{1,3})\]/g, '<button class="ref" data-n="$1">#$1</button>');
 }
+chatLog.addEventListener("click", (e) => {
+  const b = e.target.closest(".ref");
+  const l = b && state.result?.listings[+b.dataset.n - 1];
+  if (!l) return;
+  highlight(l.id, true);
+  const m = state.markers[l.id];
+  if (m) { map.setView(m.getLatLng(), Math.max(map.getZoom(), 15)); m.openPopup(); }
+});
 function addMsg(role, text) {
   const div = document.createElement("div");
   div.className = "msg " + role;
@@ -237,6 +247,7 @@ async function sendChat(text) {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     state.chat.push({ role: "assistant", content: data.reply });
     addMsg("assistant", data.reply || "…");
+    if (data.provider === "basic") $("#aiMode").textContent = "простой режим";
     if (data.search) {
       applyQueryToForm(data.search.query);
       if (data.search.area?.city) $('#search [name="location"]').value = data.search.area.city;
@@ -267,9 +278,9 @@ $("#chatToggle").addEventListener("click", () => { $("#chat").classList.add("ope
 async function initChat() {
   let provider = "basic";
   try { provider = (await (await fetch("/api/ai/status")).json()).provider; } catch { /* офлайн */ }
-  $("#aiMode").textContent = { anthropic: "Claude", openai: "LLM", basic: "простой режим" }[provider] || provider;
+  $("#aiMode").textContent = { anthropic: "Claude", openai: "LLM", free: "бесплатный ИИ", basic: "простой режим" }[provider] || provider;
   addMsg("assistant", "Привет! Расскажите, что ищете: город, на сколько, бюджет и что важно (тишина, метро, рабочее место, животные…). Я поищу сразу на всех сайтах и помогу выбрать.");
-  if (provider === "basic") addMsg("note", "ИИ-ключ не настроен — понимаю только простые запросы. См. README.");
+  if (provider === "basic") addMsg("note", "Простой режим: понимаю прямые запросы (город, срок, бюджет, комнаты).");
 }
 
 // --- старт ------------------------------------------------------------------

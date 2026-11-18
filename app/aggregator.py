@@ -8,6 +8,7 @@ import os
 import re
 import time
 from difflib import SequenceMatcher
+from statistics import median
 
 import httpx
 
@@ -106,9 +107,39 @@ def deduplicate(items: list[Listing]) -> list[Listing]:
     return out
 
 
-def apply_filters(items: list[Listing], q: SearchQuery) -> list[Listing]:
+TYPE_GROUPS = {
+    "apartment": {"apartment", "studio", "vacation_rental", "flat", "condo", "residence", "apartmentcomplex"},
+    "studio": {"studio", "apartment"},
+    "hotel": {"hotel", "motel", "resort", "hotelroom", "suite", "lodgingbusiness"},
+    "hostel": {"hostel"},
+    "guest_house": {"guest_house", "bedandbreakfast", "chalet"},
+    "house": {"house", "villa", "singlefamilyresidence", "cottage"},
+    "villa": {"villa", "house"},
+    "room": {"room", "hostel"},
+    "vacation_rental": {"vacation_rental", "apartment", "studio", "house", "villa", "room"},
+}
+
+
+def expand_types(types: list[str]) -> set[str]:
+    out: set[str] = set()
+    for t in types:
+        t = t.lower().replace(" ", "_")
+        out |= TYPE_GROUPS.get(t, {t})
+    return out
+
+
+def search_radius_km(area: GeoArea, q: SearchQuery) -> float:
+    """Радиус отсева от размера найденного места: для города — его границы с запасом,
+    для района — минимум 5 км. Долгосрочно допускаем пригороды пошире."""
+    s, w, n, e = area.bbox
+    half_diag = haversine_km(s, w, n, e) / 2
+    k = 1.3 if q.mode.value == "short" else 1.8
+    return max(5.0, min(MAX_DISTANCE_KM, half_diag * k))
+
+
+def apply_filters(items: list[Listing], q: SearchQuery, radius_km: float = MAX_DISTANCE_KM) -> list[Listing]:
     res = []
-    types = {t.lower() for t in q.property_types}
+    types = expand_types(q.property_types)
     for it in items:
         if q.price_min is not None and (it.price_conv is None or it.price_conv < q.price_min):
             continue
@@ -120,10 +151,31 @@ def apply_filters(items: list[Listing], q: SearchQuery) -> list[Listing]:
             continue
         if types and (it.property_type or "").lower() not in types:
             continue
-        if it.distance_km is not None and it.distance_km > MAX_DISTANCE_KM:
+        if it.distance_km is not None and it.distance_km > radius_km:
             continue
         res.append(it)
     return res
+
+
+SUSPICIOUS_RATIO = float(os.getenv("SUSPICIOUS_RATIO", "0.4"))
+
+
+def flag_outliers(items: list[Listing]) -> None:
+    """Помечает объявления сильно дешевле медианы похожих (с той же комнатностью, если известна).
+    В аренде это частый признак приманки или мошенничества."""
+    priced = [x for x in items if x.price_conv]
+    if len(priced) < 8:
+        return
+    overall = median(x.price_conv for x in priced)
+    by_rooms: dict[int, list[float]] = {}
+    for x in priced:
+        if x.rooms is not None:
+            by_rooms.setdefault(x.rooms, []).append(x.price_conv)
+    for x in priced:
+        group = by_rooms.get(x.rooms) if x.rooms is not None else None
+        ref = median(group) if group and len(group) >= 5 else overall
+        if x.price_conv < ref * SUSPICIOUS_RATIO and "too_cheap" not in x.flags:
+            x.flags.append("too_cheap")
 
 
 def relevance(it: Listing) -> float:
@@ -134,6 +186,7 @@ def relevance(it: Listing) -> float:
     s += min(len(it.also_on), 3) * 0.7  # объект есть на нескольких сайтах — можно сравнить цены
     s -= min(it.distance_km or 0, 20) * 0.15
     s += 0.5 if it.reviews and it.reviews > 50 else 0
+    s -= 4 if "too_cheap" in it.flags else 0
     return s
 
 
@@ -173,6 +226,8 @@ async def aggregate(client: httpx.AsyncClient, sources: dict[str, Source], q: Se
                 l.distance_km = round(haversine_km(area.lat, area.lon, l.lat, l.lon), 2)
             items.append(l)
     items = deduplicate(items)
-    items = apply_filters(items, q)
+    radius = search_radius_km(area, q)
+    flag_outliers([x for x in items if x.distance_km is None or x.distance_km <= radius])  # медиана до фильтра по цене
+    items = apply_filters(items, q, radius)
     items = sort_items(items, q.sort)
     return items, stats

@@ -102,3 +102,5 @@ legend { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .filters label.src { flex-direction: row; color: var(--ink); margin-bottom: 6px; }
 .filters details { margin-top: 6px; color: var(--muted); font-size: 12px; }
 .filters details summary { cursor: pointer; margin-bottom: 6px; }
+.ref { border: 0; background: var(--accent); color: #fff; border-radius: 6px; padding: 0 6px; font-size: 12px; cursor: pointer; }
+.warn { font-size: 11px; color: #b3261e; background: #fdeee8; border-radius: 6px; padding: 2px 6px; align-self: flex-start; }
